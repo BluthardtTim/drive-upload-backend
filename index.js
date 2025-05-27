@@ -3,6 +3,7 @@ import fileUpload from 'express-fileupload';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { google } from 'googleapis';
+import { Readable } from 'stream';
 
 dotenv.config();
 
@@ -52,7 +53,7 @@ app.post('/upload-file', async (req, res) => {
       },
       media: {
         mimeType: file.mimetype,
-        body: file.data
+        body: Readable.from(file.data) // 👈 hier ist der Fix!
       },
       fields: 'id, name'
     });
