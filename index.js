@@ -1,15 +1,17 @@
 import express from 'express';
+import fileUpload from 'express-fileupload';
 import cors from 'cors';
-import { google } from 'googleapis';
 import dotenv from 'dotenv';
+import { google } from 'googleapis';
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
+app.use(fileUpload()); // ← Das aktiviert das Parsen von multipart/form-data
+
 const PORT = process.env.PORT || 3000;
 
-app.use(cors());
-app.use(express.json());
 
 const oauth2Client = new google.auth.OAuth2(
   process.env.CLIENT_ID,
@@ -23,7 +25,8 @@ oauth2Client.setCredentials({
 
 app.post('/upload-file', async (req, res) => {
   try {
-    const { name, parentFolderId } = req.body;
+    const name = req.body?.name;
+    const parentFolderId = req.body?.parentFolderId;
     const file = req.files?.file;
 
     if (!file || !name) {
@@ -42,7 +45,6 @@ app.post('/upload-file', async (req, res) => {
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    // Hochladen zur Drive API
     const response = await drive.files.create({
       requestBody: {
         name: name,
@@ -50,7 +52,7 @@ app.post('/upload-file', async (req, res) => {
       },
       media: {
         mimeType: file.mimetype,
-        body: file.data // Buffer direkt senden
+        body: file.data
       },
       fields: 'id, name'
     });
@@ -58,10 +60,15 @@ app.post('/upload-file', async (req, res) => {
     res.json({ success: true, fileId: response.data.id, fileName: response.data.name });
 
   } catch (error) {
-    console.error('Fehler beim Datei-Upload:', error);
+    console.error('Fehler beim Datei-Upload:', {
+      message: error.message,
+      stack: error.stack,
+      response: error.response?.data,
+    });
     res.status(500).json({ success: false, error: 'Upload fehlgeschlagen' });
   }
 });
+
 
 
 
