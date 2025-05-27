@@ -25,26 +25,24 @@ app.post('/create-upload-url', async (req, res) => {
   try {
     const { filename, parentFolderId } = req.body;
 
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const url = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable';
 
-    const response = await drive.files.create(
-      {
-        requestBody: {
-          name: filename,
-          parents: [parentFolderId || 'root'],
-        },
+    const token = await oauth2Client.getAccessToken();
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${token.token}`,
+        'Content-Type': 'application/json',
+        'X-Upload-Content-Type': 'application/octet-stream',
       },
-      {
-        params: {
-          uploadType: 'resumable',
-        },
-        headers: {
-          'X-Upload-Content-Type': 'application/octet-stream',
-        },
-      }
-    );
+      body: JSON.stringify({
+        name: filename,
+        parents: [parentFolderId || 'root'],
+      })
+    });
 
-    const uploadUrl = response.headers.location;
+    const uploadUrl = response.headers.get('location');
 
     if (!uploadUrl) {
       throw new Error('Google Drive hat keine Upload-URL zurückgegeben');
@@ -63,6 +61,7 @@ app.post('/create-upload-url', async (req, res) => {
     res.status(500).json({ success: false, error: 'Fehler beim Erstellen der Upload-URL' });
   }
 });
+
 
 
 
