@@ -53,10 +53,17 @@ app.post('/create-upload-url', async (req, res) => {
     res.json({ success: true, uploadUrl });
 
   } catch (error) {
-    console.error('Fehler beim Erstellen der Upload-URL:', error.message || error);
+    console.error('Fehler beim Erstellen der Upload-URL:', {
+      message: error.message,
+      response: error.response?.data,
+      code: error.code,
+      stack: error.stack,
+    });
+
     res.status(500).json({ success: false, error: 'Fehler beim Erstellen der Upload-URL' });
   }
 });
+
 
 
 app.listen(PORT, () => {
