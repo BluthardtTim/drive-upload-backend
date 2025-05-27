@@ -27,30 +27,37 @@ app.post('/create-upload-url', async (req, res) => {
 
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
-    const response = await drive.files.create({
-      requestBody: {
-        name: filename,
-        parents: [parentFolderId || 'root']
+    const response = await drive.files.create(
+      {
+        requestBody: {
+          name: filename,
+          parents: [parentFolderId || 'root'],
+        },
       },
-      media: {},
-      fields: 'id',
-    }, {
-      headers: {
-        'X-Upload-Content-Type': 'application/octet-stream',
-      },
-      params: {
-        uploadType: 'resumable'
+      {
+        params: {
+          uploadType: 'resumable',
+        },
+        headers: {
+          'X-Upload-Content-Type': 'application/octet-stream',
+        },
       }
-    });
+    );
 
     const uploadUrl = response.headers.location;
+
+    if (!uploadUrl) {
+      throw new Error('Google Drive hat keine Upload-URL zurückgegeben');
+    }
+
     res.json({ success: true, uploadUrl });
 
   } catch (error) {
-    console.error('Fehler beim Erstellen der Upload-URL:', error);
+    console.error('Fehler beim Erstellen der Upload-URL:', error.message || error);
     res.status(500).json({ success: false, error: 'Fehler beim Erstellen der Upload-URL' });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
