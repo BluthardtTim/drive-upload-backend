@@ -4,6 +4,71 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { google } from 'googleapis';
 import { Readable } from 'stream';
+import archiver from 'archiver';
+import { PassThrough } from 'stream';
+
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+// Hilfsfunktion: rekursiv alle Dateien aus Ordnern holen
+const listAllFilesRecursive = async (parentId, path = '') => {
+  const fileList = [];
+  let pageToken;
+
+  do {
+    const res = await drive.files.list({
+      q: `'${parentId}' in parents and trashed = false`,
+      fields: 'nextPageToken, files(id, name, mimeType)',
+      pageSize: 1000,
+      pageToken,
+    });
+
+    for (const file of res.data.files) {
+      if (file.mimeType === 'application/vnd.google-apps.folder') {
+        const subFiles = await listAllFilesRecursive(file.id, `${path}${file.name}/`);
+        fileList.push(...subFiles);
+      } else {
+        fileList.push({ ...file, path: `${path}${file.name}` });
+      }
+    }
+
+    pageToken = res.data.nextPageToken;
+  } while (pageToken);
+
+  return fileList;
+};
+
+// ZIP-Download-Route
+app.get('/download-zip', async (req, res) => {
+  const folderId = req.query.folderId;
+  if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
+
+  try {
+    const files = await listAllFilesRecursive(folderId);
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
+
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    const passthrough = new PassThrough();
+
+    archive.pipe(passthrough);
+    passthrough.pipe(res);
+
+    const filePromises = files.map(async (file) => {
+      const stream = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'stream' });
+      archive.append(stream.data, { name: file.path });
+    });
+
+    await Promise.all(filePromises);
+    archive.finalize();
+  } catch (err) {
+    console.error('Fehler beim ZIP-Download:', err);
+    res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
+  }
+});
+
+
+
 
 dotenv.config();
 
