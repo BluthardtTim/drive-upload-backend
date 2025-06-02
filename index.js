@@ -13,7 +13,6 @@ import { PassThrough } from 'stream';
 // }));
 
 
-const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
 // Hilfsfunktion: rekursiv alle Dateien aus Ordnern holen
 const listAllFilesRecursive = async (parentId, path = '') => {
@@ -79,7 +78,12 @@ app.get('/download-zip', async (req, res) => {
 dotenv.config();
 
 const app = express();
-// app.use(cors());
+
+app.use(cors({
+  origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
+  methods: ['GET', 'POST'],
+}));
+
 app.use(fileUpload()); // ← Das aktiviert das Parsen von multipart/form-data
 
 const PORT = process.env.PORT || 3000;
@@ -94,6 +98,8 @@ const oauth2Client = new google.auth.OAuth2(
 oauth2Client.setCredentials({
   refresh_token: process.env.REFRESH_TOKEN
 });
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
 
 app.post('/upload-file', async (req, res) => {
   try {
