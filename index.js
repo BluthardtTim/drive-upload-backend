@@ -73,7 +73,11 @@ app.get('/download-zip', async (req, res) => {
 dotenv.config();
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: '*', // oder spezifisch: 'https://image-drive-bthg741os-bluthardttims-projects.vercel.app'
+  methods: ['GET', 'POST'],
+}));
+
 app.use(fileUpload()); // ← Das aktiviert das Parsen von multipart/form-data
 
 const PORT = process.env.PORT || 3000;
