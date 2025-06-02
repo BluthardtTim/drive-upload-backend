@@ -7,14 +7,32 @@ import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
-// app.use(cors({
-//   origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
-//   methods: ['GET', 'POST'],
-// }));
+dotenv.config();
 
+const app = express();
 
+app.use(cors({
+  origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
+  methods: ['GET', 'POST'],
+}));
 
-// Hilfsfunktion: rekursiv alle Dateien aus Ordnern holen
+app.use(fileUpload());
+
+const PORT = process.env.PORT || 3000;
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.CLIENT_ID,
+  process.env.CLIENT_SECRET,
+  process.env.REDIRECT_URI
+);
+
+oauth2Client.setCredentials({
+  refresh_token: process.env.REFRESH_TOKEN
+});
+
+const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+// Hilfsfunktion: rekursiv Dateien auflisten
 const listAllFilesRecursive = async (parentId, path = '') => {
   const fileList = [];
   let pageToken;
@@ -42,7 +60,7 @@ const listAllFilesRecursive = async (parentId, path = '') => {
   return fileList;
 };
 
-// ZIP-Download-Route
+// ZIP-Download Route
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
   if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
@@ -72,35 +90,7 @@ app.get('/download-zip', async (req, res) => {
   }
 });
 
-
-
-
-dotenv.config();
-
-const app = express();
-
-app.use(cors({
-  origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
-  methods: ['GET', 'POST'],
-}));
-
-app.use(fileUpload()); // ← Das aktiviert das Parsen von multipart/form-data
-
-const PORT = process.env.PORT || 3000;
-
-
-const oauth2Client = new google.auth.OAuth2(
-  process.env.CLIENT_ID,
-  process.env.CLIENT_SECRET,
-  process.env.REDIRECT_URI
-);
-
-oauth2Client.setCredentials({
-  refresh_token: process.env.REFRESH_TOKEN
-});
-const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
-
+// Upload-Route
 app.post('/upload-file', async (req, res) => {
   try {
     const name = req.body?.name;
@@ -111,18 +101,6 @@ app.post('/upload-file', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Datei oder Name fehlt' });
     }
 
-    const oauth2Client = new google.auth.OAuth2(
-      process.env.CLIENT_ID,
-      process.env.CLIENT_SECRET,
-      process.env.REDIRECT_URI
-    );
-
-    oauth2Client.setCredentials({
-      refresh_token: process.env.REFRESH_TOKEN
-    });
-
-    const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
     const response = await drive.files.create({
       requestBody: {
         name: name,
@@ -130,7 +108,7 @@ app.post('/upload-file', async (req, res) => {
       },
       media: {
         mimeType: file.mimetype,
-        body: Readable.from(file.data) // 👈 hier ist der Fix!
+        body: Readable.from(file.data)
       },
       fields: 'id, name'
     });
@@ -146,11 +124,6 @@ app.post('/upload-file', async (req, res) => {
     res.status(500).json({ success: false, error: 'Upload fehlgeschlagen' });
   }
 });
-
-
-
-
-
 
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
