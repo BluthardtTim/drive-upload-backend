@@ -7,6 +7,12 @@ import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
+app.use(cors({
+  origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
+  methods: ['GET', 'POST'],
+}));
+
+
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
 
 // Hilfsfunktion: rekursiv alle Dateien aus Ordnern holen
@@ -73,11 +79,7 @@ app.get('/download-zip', async (req, res) => {
 dotenv.config();
 
 const app = express();
-app.use(cors({
-  origin: '*', // oder spezifisch: 'https://image-drive-bthg741os-bluthardttims-projects.vercel.app'
-  methods: ['GET', 'POST'],
-}));
-
+app.use(cors());
 app.use(fileUpload()); // ← Das aktiviert das Parsen von multipart/form-data
 
 const PORT = process.env.PORT || 3000;
