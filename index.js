@@ -66,29 +66,38 @@ app.get('/download-zip', async (req, res) => {
   if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
 
   try {
-    const files = await listAllFilesRecursive(folderId);
+    const files = await listAllFilesRecursive(folderId); // deine rekursive Funktion
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    const passthrough = new PassThrough();
-
-    archive.pipe(passthrough);
-    passthrough.pipe(res);
-
-    const filePromises = files.map(async (file) => {
-      const stream = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'stream' });
-      archive.append(stream.data, { name: file.path });
+    archive.on('error', err => {
+      console.error('Archiv-Fehler:', err);
+      res.status(500).end();
     });
 
-    await Promise.all(filePromises);
+    archive.pipe(res);
+
+    // 🔁 Statt Promise.all → sequentiell streamen (RAM-schonend)
+    for (const file of files) {
+      const response = await drive.files.get({
+        fileId: file.id,
+        alt: 'media'
+      }, { responseType: 'stream' });
+
+      archive.append(response.data, { name: file.path });
+    }
+
     archive.finalize();
   } catch (err) {
-    console.error('Fehler beim ZIP-Download:', err);
-    res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
+    console.error('Fehler beim Download:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
+    }
   }
 });
+
 
 // Upload-Route
 app.post('/upload-file', async (req, res) => {
