@@ -7,8 +7,6 @@ import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
-
-
 dotenv.config();
 
 const app = express();
@@ -63,85 +61,34 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 };
 
 // ZIP-Download Route
-
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
   if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
 
   try {
     const files = await listAllFilesRecursive(folderId);
-    if (!files.length) {
-      return res.status(404).json({ error: 'Keine Dateien gefunden' });
-    }
 
-    const zipPath = path.join(os.tmpdir(), `gallery-${Date.now()}.zip`);
-    const output = fs.createWriteStream(zipPath);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
+
     const archive = archiver('zip', { zlib: { level: 9 } });
+    const passthrough = new PassThrough();
 
-    archive.on('error', err => {
-      console.error('ZIP-Fehler:', err);
-      return res.status(500).send('ZIP-Fehler');
+    archive.pipe(passthrough);
+    passthrough.pipe(res);
+
+    const filePromises = files.map(async (file) => {
+      const stream = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'stream' });
+      archive.append(stream.data, { name: file.path });
     });
 
-    archive.pipe(output);
-
-    for (const file of files) {
-      const { data } = await drive.files.get(
-        { fileId: file.id, alt: 'media' },
-        { responseType: 'stream' }
-      );
-      archive.append(data, { name: file.path || file.name });
-    }
-
+    await Promise.all(filePromises);
     archive.finalize();
-
-    output.on('close', async () => {
-      try {
-        const fileMetadata = {
-          name: `gallery-${Date.now()}.zip`,
-          parents: [folderId]
-        };
-        const media = {
-          mimeType: 'application/zip',
-          body: fs.createReadStream(zipPath)
-        };
-        const uploadResponse = await drive.files.create({
-          requestBody: fileMetadata,
-          media,
-          fields: 'id'
-        });
-
-        fs.unlink(zipPath, () => {}); // optional: löschen
-
-        const fileId = uploadResponse.data.id;
-        const link = `https://drive.google.com/uc?export=download&id=${fileId}`;
-
-        return res.json({ success: true, downloadLink: link });
-      } catch (err) {
-        console.error('Fehler beim Upload zur Drive:', err);
-        res.status(500).json({ error: 'ZIP konnte nicht zu Google Drive hochgeladen werden' });
-      }
-    });
-
-  } catch (error) {
-    console.error('Fehler in /download-zip:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Interner Fehler beim Download' });
-    }
+  } catch (err) {
+    console.error('Fehler beim ZIP-Download:', err);
+    res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
   }
 });
-
-
-
-
-
-
-
-
 
 // Upload-Route
 app.post('/upload-file', async (req, res) => {
@@ -163,8 +110,8 @@ app.post('/upload-file', async (req, res) => {
         mimeType: file.mimetype,
         // body: Readable.from(file.data)
         body: file.data instanceof Buffer
-  ? Readable.from(file.data)
-  : file.data
+          ? Readable.from(file.data)
+          : file.data
       },
       fields: 'id, name'
     });
