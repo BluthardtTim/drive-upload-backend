@@ -108,10 +108,7 @@ app.post('/upload-file', async (req, res) => {
       },
       media: {
         mimeType: file.mimetype,
-        // body: Readable.from(file.data)
-        body: file.data instanceof Buffer
-          ? Readable.from(file.data)
-          : file.data
+        body: Readable.from(file.data)
       },
       fields: 'id, name'
     });
