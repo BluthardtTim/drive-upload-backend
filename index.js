@@ -66,25 +66,28 @@ app.get('/download-zip', async (req, res) => {
   if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
 
   try {
-    const files = await listAllFilesRecursive(folderId); // du hast diese Funktion
+    const files = await listAllFilesRecursive(folderId);
 
     if (!files.length) {
       return res.status(404).json({ error: 'Keine Dateien gefunden' });
     }
 
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
-    res.flushHeaders(); // zwingt sofortiges Senden der Header
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="folder.zip"',
+      'Transfer-Encoding': 'chunked',
+      'Connection': 'keep-alive'
+    });
 
     const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.pipe(res);
 
     archive.on('error', err => {
       console.error('ZIP-Fehler:', err);
-      res.status(500).end('Fehler beim Erstellen des ZIPs');
+      if (!res.headersSent) res.status(500).end('ZIP-Fehler');
     });
 
-    // ✅ RAM-schonender Einzel-Stream statt Promise.all
+    archive.pipe(res);
+
     for (const file of files) {
       const { data } = await drive.files.get(
         { fileId: file.id, alt: 'media' },
@@ -93,7 +96,7 @@ app.get('/download-zip', async (req, res) => {
       archive.append(data, { name: file.path || file.name });
     }
 
-    archive.finalize(); // WICHTIG
+    archive.finalize();
   } catch (error) {
     console.error('Fehler in /download-zip:', error);
     if (!res.headersSent) {
@@ -101,6 +104,7 @@ app.get('/download-zip', async (req, res) => {
     }
   }
 });
+
 
 
 
