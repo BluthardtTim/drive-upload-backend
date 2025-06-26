@@ -66,26 +66,27 @@ app.get('/download-zip', async (req, res) => {
   if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
 
   try {
-    const files = await listAllFilesRecursive(folderId); // deine rekursive Funktion
+    const files = await listAllFilesRecursive(folderId);
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
+    res.flushHeaders(); // wichtig!
 
     const archive = archiver('zip', { zlib: { level: 9 } });
+
     archive.on('error', err => {
       console.error('Archiv-Fehler:', err);
-      res.status(500).end();
+      if (!res.headersSent) res.status(500).end('ZIP-Fehler');
     });
 
     archive.pipe(res);
 
-    // 🔁 Statt Promise.all → sequentiell streamen (RAM-schonend)
     for (const file of files) {
-      const response = await drive.files.get({
-        fileId: file.id,
-        alt: 'media'
-      }, { responseType: 'stream' });
-
+      console.log('Datei wird hinzugefügt:', file.path); // Debug
+      const response = await drive.files.get(
+        { fileId: file.id, alt: 'media' },
+        { responseType: 'stream' }
+      );
       archive.append(response.data, { name: file.path });
     }
 
@@ -97,6 +98,7 @@ app.get('/download-zip', async (req, res) => {
     }
   }
 });
+
 
 
 // Upload-Route
