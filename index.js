@@ -61,7 +61,6 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 };
 
 // ZIP-Download Route
-import { PassThrough } from 'stream';
 
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
