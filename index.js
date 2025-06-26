@@ -77,13 +77,22 @@ app.get('/download-zip', async (req, res) => {
     archive.pipe(passthrough);
     passthrough.pipe(res);
 
-    const filePromises = files.map(async (file) => {
-      const stream = await drive.files.get({ fileId: file.id, alt: 'media' }, { responseType: 'stream' });
-      archive.append(stream.data, { name: file.path });
-    });
+    for (const file of files) {
+  try {
+    const stream = await drive.files.get(
+      { fileId: file.id, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    archive.append(stream.data, { name: file.path });
+  } catch (error) {
+    console.error(`Fehler bei Datei ${file.path}:`, error.message);
+  }
+}
 
-    await Promise.all(filePromises);
-    archive.finalize();
+archive.finalize();
+
+
+
   } catch (err) {
     console.error('Fehler beim ZIP-Download:', err);
     res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
