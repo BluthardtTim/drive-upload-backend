@@ -61,51 +61,61 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 };
 
 // ZIP-Download Route
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
+  if (!folderId) {
+    return res.status(400).json({ error: 'folderId ist erforderlich' });
+  }
 
   try {
     const files = await listAllFilesRecursive(folderId);
+    if (!files.length) {
+      return res.status(404).json({ error: 'Keine Dateien gefunden' });
+    }
 
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
-
+    const zipPath = path.join(os.tmpdir(), `gallery-${Date.now()}.zip`);
+    const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
-    const passthrough = new PassThrough();
 
-    archive.pipe(passthrough);
-    passthrough.pipe(res);
+    archive.pipe(output);
 
-    const keepAlive = setInterval(() => {
-  archive.append('', { name: `.keepalive-${Date.now()}` });
-}, 15000); // alle 15 Sekunden
+    archive.on('error', (err) => {
+      console.error('ZIP-Fehler:', err);
+      res.status(500).end('ZIP-Fehler');
+    });
 
-archive.on('end', () => clearInterval(keepAlive));
-archive.on('error', () => clearInterval(keepAlive));
-
+    output.on('close', () => {
+      res.download(zipPath, 'folder.zip', (err) => {
+        fs.unlink(zipPath, () => {}); // temporäre Datei löschen
+        if (err) {
+          console.error('Fehler beim Senden:', err.message);
+        }
+      });
+    });
 
     for (const file of files) {
-  try {
-    const stream = await drive.files.get(
-      { fileId: file.id, alt: 'media' },
-      { responseType: 'stream' }
-    );
-    archive.append(stream.data, { name: file.path });
+      try {
+        const { data } = await drive.files.get(
+          { fileId: file.id, alt: 'media' },
+          { responseType: 'stream' }
+        );
+        archive.append(data, { name: file.path || file.name });
+      } catch (e) {
+        console.error('Fehler bei Datei:', file.name, e.message);
+      }
+    }
+
+    archive.finalize();
   } catch (error) {
-    console.error(`Fehler bei Datei ${file.path}:`, error.message);
-  }
-}
-
-archive.finalize();
-
-
-
-  } catch (err) {
-    console.error('Fehler beim ZIP-Download:', err);
-    res.status(500).json({ error: 'ZIP-Download fehlgeschlagen' });
+    console.error('Fehler in /download-zip:', error);
+    res.status(500).json({ error: 'Interner Fehler beim Download' });
   }
 });
+
 
 // Upload-Route
 app.post('/upload-file', async (req, res) => {
