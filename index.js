@@ -67,54 +67,46 @@ import os from 'os';
 
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  if (!folderId) {
-    return res.status(400).json({ error: 'folderId ist erforderlich' });
-  }
+  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
   try {
     const files = await listAllFilesRecursive(folderId);
-    if (!files.length) {
-      return res.status(404).json({ error: 'Keine Dateien gefunden' });
-    }
+    if (!files.length) return res.status(404).json({ error: 'Ordner leer' });
 
-    const zipPath = path.join(os.tmpdir(), `gallery-${Date.now()}.zip`);
-    const output = fs.createWriteStream(zipPath);
+    const tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}.zip`);
+    const output = fs.createWriteStream(tmpPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
-
-    archive.pipe(output);
 
     archive.on('error', (err) => {
       console.error('ZIP-Fehler:', err);
-      res.status(500).end('ZIP-Fehler');
+      return res.status(500).send('Fehler beim Erstellen der ZIP-Datei');
     });
 
-    output.on('close', () => {
-      res.download(zipPath, 'folder.zip', (err) => {
-        fs.unlink(zipPath, () => {}); // temporäre Datei löschen
-        if (err) {
-          console.error('Fehler beim Senden:', err.message);
-        }
-      });
-    });
+    archive.pipe(output);
 
     for (const file of files) {
-      try {
-        const { data } = await drive.files.get(
-          { fileId: file.id, alt: 'media' },
-          { responseType: 'stream' }
-        );
-        archive.append(data, { name: file.path || file.name });
-      } catch (e) {
-        console.error('Fehler bei Datei:', file.name, e.message);
-      }
+      const { data } = await drive.files.get(
+        { fileId: file.id, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      archive.append(data, { name: file.path || file.name });
     }
 
     archive.finalize();
+
+    output.on('close', () => {
+      res.download(tmpPath, 'folder.zip', (err) => {
+        fs.unlink(tmpPath, () => {}); // temporäre Datei löschen
+        if (err) console.error('Fehler beim Senden:', err.message);
+      });
+    });
+
   } catch (error) {
     console.error('Fehler in /download-zip:', error);
-    res.status(500).json({ error: 'Interner Fehler beim Download' });
+    res.status(500).json({ error: 'Interner Fehler beim ZIP-Download' });
   }
 });
+
 
 
 // Upload-Route
