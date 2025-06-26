@@ -61,6 +61,8 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 };
 
 // ZIP-Download Route
+import { PassThrough } from 'stream';
+
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
   if (!folderId) {
@@ -69,51 +71,51 @@ app.get('/download-zip', async (req, res) => {
 
   try {
     const files = await listAllFilesRecursive(folderId);
-
     if (!files.length) {
       return res.status(404).json({ error: 'Keine Dateien gefunden' });
     }
 
     const archive = archiver('zip', { zlib: { level: 9 } });
+    const passthrough = new PassThrough();
 
-    // Fehlerbehandlung
-    archive.on('error', err => {
+    archive.on('error', (err) => {
       console.error('ZIP-Fehler:', err);
       if (!res.headersSent) res.status(500).end('ZIP-Fehler');
     });
 
-    // Diese Header sind entscheidend für Render-Streaming
+    // Pipe archive into a passthrough stream, then into res
+    archive.pipe(passthrough);
+    passthrough.pipe(res);
+
     res.writeHead(200, {
       'Content-Type': 'application/zip',
       'Content-Disposition': 'attachment; filename="folder.zip"',
       'Transfer-Encoding': 'chunked',
-      'Connection': 'keep-alive',
+      'Connection': 'keep-alive'
     });
 
-    // Start des Streams
-    archive.pipe(res);
-
-    // RAM-schonend: sequentielles Anhängen
-    for (const file of files) {
+    // Append files one by one
+    for (const file of files.slice(0, 1)) { // Try first file only
       try {
         const { data } = await drive.files.get(
           { fileId: file.id, alt: 'media' },
           { responseType: 'stream' }
         );
         archive.append(data, { name: file.path || file.name });
-      } catch (streamError) {
-        console.error(`Fehler beim Streamen von ${file.name}:`, streamError.message);
+      } catch (err) {
+        console.error(`Fehler bei Datei ${file.name}:`, err.message);
       }
     }
 
     archive.finalize();
-  } catch (error) {
-    console.error('Fehler in /download-zip:', error);
+  } catch (err) {
+    console.error('Fehler in /download-zip:', err);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Interner Fehler beim Download' });
     }
   }
 });
+
 
 
 
