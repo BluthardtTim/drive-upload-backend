@@ -7,6 +7,8 @@ import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
+
+
 dotenv.config();
 
 const app = express();
@@ -62,6 +64,14 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 
 // ZIP-Download Route
 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import os from 'os';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
   if (!folderId) {
@@ -74,46 +84,44 @@ app.get('/download-zip', async (req, res) => {
       return res.status(404).json({ error: 'Keine Dateien gefunden' });
     }
 
+    const zipPath = path.join(os.tmpdir(), `download-${Date.now()}.zip`);
+    const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
-    const passthrough = new PassThrough();
 
-    archive.on('error', (err) => {
+    archive.on('error', err => {
       console.error('ZIP-Fehler:', err);
-      if (!res.headersSent) res.status(500).end('ZIP-Fehler');
+      return res.status(500).send('ZIP-Erstellung fehlgeschlagen');
     });
 
-    // Pipe archive into a passthrough stream, then into res
-    archive.pipe(passthrough);
-    passthrough.pipe(res);
+    archive.pipe(output);
 
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="folder.zip"',
-      'Transfer-Encoding': 'chunked',
-      'Connection': 'keep-alive'
-    });
-
-    // Append files one by one
-    for (const file of files.slice(0, 1)) { // Try first file only
-      try {
-        const { data } = await drive.files.get(
-          { fileId: file.id, alt: 'media' },
-          { responseType: 'stream' }
-        );
-        archive.append(data, { name: file.path || file.name });
-      } catch (err) {
-        console.error(`Fehler bei Datei ${file.name}:`, err.message);
-      }
+    for (const file of files) {
+      const { data } = await drive.files.get(
+        { fileId: file.id, alt: 'media' },
+        { responseType: 'stream' }
+      );
+      archive.append(data, { name: file.path || file.name });
     }
 
     archive.finalize();
-  } catch (err) {
-    console.error('Fehler in /download-zip:', err);
+
+    output.on('close', () => {
+      res.download(zipPath, 'folder.zip', err => {
+        if (err) {
+          console.error('Download-Fehler:', err);
+        }
+        fs.unlink(zipPath, () => {}); // ZIP-Datei nach Download löschen
+      });
+    });
+
+  } catch (error) {
+    console.error('Fehler in /download-zip:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: 'Interner Fehler beim Download' });
     }
   }
 });
+
 
 
 
