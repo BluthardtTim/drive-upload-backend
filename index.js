@@ -63,7 +63,9 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 // ZIP-Download Route
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
+  if (!folderId) {
+    return res.status(400).json({ error: 'folderId ist erforderlich' });
+  }
 
   try {
     const files = await listAllFilesRecursive(folderId);
@@ -72,28 +74,36 @@ app.get('/download-zip', async (req, res) => {
       return res.status(404).json({ error: 'Keine Dateien gefunden' });
     }
 
-    res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': 'attachment; filename="folder.zip"',
-      'Transfer-Encoding': 'chunked',
-      'Connection': 'keep-alive'
-    });
-
     const archive = archiver('zip', { zlib: { level: 9 } });
 
+    // Fehlerbehandlung
     archive.on('error', err => {
       console.error('ZIP-Fehler:', err);
       if (!res.headersSent) res.status(500).end('ZIP-Fehler');
     });
 
+    // Diese Header sind entscheidend für Render-Streaming
+    res.writeHead(200, {
+      'Content-Type': 'application/zip',
+      'Content-Disposition': 'attachment; filename="folder.zip"',
+      'Transfer-Encoding': 'chunked',
+      'Connection': 'keep-alive',
+    });
+
+    // Start des Streams
     archive.pipe(res);
 
+    // RAM-schonend: sequentielles Anhängen
     for (const file of files) {
-      const { data } = await drive.files.get(
-        { fileId: file.id, alt: 'media' },
-        { responseType: 'stream' }
-      );
-      archive.append(data, { name: file.path || file.name });
+      try {
+        const { data } = await drive.files.get(
+          { fileId: file.id, alt: 'media' },
+          { responseType: 'stream' }
+        );
+        archive.append(data, { name: file.path || file.name });
+      } catch (streamError) {
+        console.error(`Fehler beim Streamen von ${file.name}:`, streamError.message);
+      }
     }
 
     archive.finalize();
@@ -104,6 +114,7 @@ app.get('/download-zip', async (req, res) => {
     }
   }
 });
+
 
 
 
