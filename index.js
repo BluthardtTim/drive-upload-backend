@@ -77,6 +77,14 @@ app.get('/download-zip', async (req, res) => {
     archive.pipe(passthrough);
     passthrough.pipe(res);
 
+    const keepAlive = setInterval(() => {
+  archive.append('', { name: `.keepalive-${Date.now()}` });
+}, 15000); // alle 15 Sekunden
+
+archive.on('end', () => clearInterval(keepAlive));
+archive.on('error', () => clearInterval(keepAlive));
+
+
     for (const file of files) {
   try {
     const stream = await drive.files.get(
