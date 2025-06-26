@@ -66,17 +66,11 @@ const listAllFilesRecursive = async (parentId, path = '') => {
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import os from 'os';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  if (!folderId) {
-    return res.status(400).json({ error: 'folderId ist erforderlich' });
-  }
+  if (!folderId) return res.status(400).json({ error: 'folderId ist erforderlich' });
 
   try {
     const files = await listAllFilesRecursive(folderId);
@@ -84,13 +78,13 @@ app.get('/download-zip', async (req, res) => {
       return res.status(404).json({ error: 'Keine Dateien gefunden' });
     }
 
-    const zipPath = path.join(os.tmpdir(), `download-${Date.now()}.zip`);
+    const zipPath = path.join(os.tmpdir(), `gallery-${Date.now()}.zip`);
     const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
 
     archive.on('error', err => {
       console.error('ZIP-Fehler:', err);
-      return res.status(500).send('ZIP-Erstellung fehlgeschlagen');
+      return res.status(500).send('ZIP-Fehler');
     });
 
     archive.pipe(output);
@@ -105,13 +99,32 @@ app.get('/download-zip', async (req, res) => {
 
     archive.finalize();
 
-    output.on('close', () => {
-      res.download(zipPath, 'folder.zip', err => {
-        if (err) {
-          console.error('Download-Fehler:', err);
-        }
-        fs.unlink(zipPath, () => {}); // ZIP-Datei nach Download löschen
-      });
+    output.on('close', async () => {
+      try {
+        const fileMetadata = {
+          name: `gallery-${Date.now()}.zip`,
+          parents: [folderId]
+        };
+        const media = {
+          mimeType: 'application/zip',
+          body: fs.createReadStream(zipPath)
+        };
+        const uploadResponse = await drive.files.create({
+          requestBody: fileMetadata,
+          media,
+          fields: 'id'
+        });
+
+        fs.unlink(zipPath, () => {}); // optional: löschen
+
+        const fileId = uploadResponse.data.id;
+        const link = `https://drive.google.com/uc?export=download&id=${fileId}`;
+
+        return res.json({ success: true, downloadLink: link });
+      } catch (err) {
+        console.error('Fehler beim Upload zur Drive:', err);
+        res.status(500).json({ error: 'ZIP konnte nicht zu Google Drive hochgeladen werden' });
+      }
     });
 
   } catch (error) {
@@ -121,6 +134,7 @@ app.get('/download-zip', async (req, res) => {
     }
   }
 });
+
 
 
 
