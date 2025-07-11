@@ -219,6 +219,23 @@ app.get('/download-zip', async (req, res) => {
 
 
 
+
+// POST /rename-file
+app.post('/rename-file', async (req, res) => {
+    const { fileId, newName } = req.body;
+    
+    // Google Drive API call to rename file
+    const response = await drive.files.update({
+        fileId: fileId,
+        requestBody: { name: newName }
+    });
+    
+    res.json({ success: true, file: response.data });
+});
+
+
+
+
 // Upload-Route
 app.post('/upload-file', async (req, res) => {
   try {
