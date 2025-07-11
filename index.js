@@ -16,6 +16,8 @@ app.use(cors({
   methods: ['GET', 'POST'],
 }));
 
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(fileUpload());
 
 const PORT = process.env.PORT || 3000;
