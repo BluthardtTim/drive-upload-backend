@@ -69,6 +69,8 @@ import os from 'os';
 
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
+  const fileIds = req.query.fileIds; // Neue Parameter für ausgewählte Dateien
+  
   if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
   let tmpPath;
@@ -92,27 +94,56 @@ app.get('/download-zip', async (req, res) => {
   try {
     console.log(`ZIP-Download gestartet für Ordner: ${folderId}`);
     
-    const files = await listAllFilesRecursive(folderId);
-    if (!files.length) return sendError(404, 'Ordner leer');
+    let files;
+    
+    // Unterscheidung zwischen vollständigem Ordner-Download und Auswahl-Download
+    if (fileIds && fileIds.trim() !== '') {
+      // Spezifische Dateiauswahl
+      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
+      console.log(`Ausgewählte Dateien: ${selectedFileIds.length}`);
+      
+      files = [];
+      for (const fileId of selectedFileIds) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id, name, mimeType'
+          });
+          files.push({
+            id: fileInfo.data.id,
+            name: fileInfo.data.name,
+            mimeType: fileInfo.data.mimeType,
+            path: fileInfo.data.name
+          });
+        } catch (error) {
+          console.warn(`Datei ${fileId} konnte nicht gefunden werden:`, error.message);
+          // Datei überspringen, nicht den ganzen Download abbrechen
+        }
+      }
+    } else {
+      // Vollständiger Ordner-Download (bestehende Logik)
+      files = await listAllFilesRecursive(folderId);
+    }
+    
+    if (!files.length) return sendError(404, 'Keine Dateien gefunden');
 
-    console.log(`${files.length} Dateien gefunden`);
+    console.log(`${files.length} Dateien zum Download vorbereitet`);
 
-    // Timeout für die gesamte Operation setzen
+    // Rest der bestehenden Logik bleibt gleich...
     const timeout = setTimeout(() => {
       console.error('ZIP-Download Timeout');
       cleanup();
       sendError(408, 'Download-Timeout');
-    }, 300000); // 5 Minuten
+    }, 300000);
 
     tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
     const output = fs.createWriteStream(tmpPath);
     const archive = archiver('zip', { 
-      zlib: { level: 6 }, // Reduziere Kompression für bessere Performance
+      zlib: { level: 6 },
       forceLocalTime: true,
-      store: files.length > 100 // Bei vielen Dateien ohne Kompression
+      store: files.length > 100
     });
 
-    // Verbesserte Fehlerbehandlung
     archive.on('error', (err) => {
       console.error('ZIP-Archiv Fehler:', err);
       clearTimeout(timeout);
@@ -133,7 +164,6 @@ app.get('/download-zip', async (req, res) => {
 
     archive.pipe(output);
 
-    // Batch-Verarbeitung der Dateien
     let processedFiles = 0;
     const batchSize = 10;
     
@@ -146,7 +176,7 @@ app.get('/download-zip', async (req, res) => {
             { fileId: file.id, alt: 'media' },
             { 
               responseType: 'stream',
-              timeout: 30000 // 30 Sekunden Timeout pro Datei
+              timeout: 30000
             }
           );
           
@@ -161,7 +191,6 @@ app.get('/download-zip', async (req, res) => {
           }
         } catch (fileError) {
           console.error(`Fehler bei Datei ${file.name}:`, fileError.message);
-          // Datei überspringen statt abzubrechen
         }
       }));
     }
@@ -176,7 +205,6 @@ app.get('/download-zip', async (req, res) => {
       if (!isResponseSent) {
         isResponseSent = true;
         
-        // Setze entsprechende Headers
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
         res.setHeader('Content-Length', fs.statSync(tmpPath).size);
