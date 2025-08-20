@@ -1,4 +1,3 @@
-// Complete Backend for Railway with all endpoints including download-info
 import express from 'express';
 import fileUpload from 'express-fileupload';
 import cors from 'cors';
@@ -7,9 +6,6 @@ import { google } from 'googleapis';
 import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
 
 dotenv.config();
 
@@ -66,54 +62,14 @@ const listAllFilesRecursive = async (parentId, path = '') => {
   return fileList;
 };
 
-// Download-Info Endpunkt - WICHTIG: Dieser Endpoint war vorher nicht vorhanden!
-app.get('/download-info', async (req, res) => {
-  const folderId = req.query.folderId;
-  
-  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
+// ZIP-Download Route
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
-  try {
-    console.log(`Download-Info abgerufen für Ordner: ${folderId}`);
-    const files = await listAllFilesRecursive(folderId);
-    
-    // Berechne ungefähre Gesamtgröße (falls verfügbar)
-    let totalSize = 0;
-    const sampleSize = Math.min(10, files.length); // Nur erste 10 Dateien checken für Performance
-    
-    for (let i = 0; i < sampleSize; i++) {
-      try {
-        const fileInfo = await drive.files.get({
-          fileId: files[i].id,
-          fields: 'size'
-        });
-        if (fileInfo.data.size) {
-          totalSize += parseInt(fileInfo.data.size);
-        }
-      } catch (error) {
-        // Ignoriere Fehler bei einzelnen Dateien
-        console.warn(`Konnte Größe für Datei ${files[i].name} nicht ermitteln`);
-      }
-    }
-    
-    // Extrapoliere basierend auf Sample
-    const estimatedTotalSize = sampleSize > 0 ? (totalSize / sampleSize) * files.length : 0;
-    
-    res.json({
-      totalFiles: files.length,
-      totalSize: estimatedTotalSize,
-      recommendedBatchSize: files.length > 500 ? 50 : 100,
-      estimatedBatches: Math.ceil(files.length / (files.length > 500 ? 50 : 100))
-    });
-  } catch (error) {
-    console.error('Fehler beim Abrufen der Download-Info:', error);
-    res.status(500).json({ error: 'Fehler beim Abrufen der Download-Info' });
-  }
-});
-
-// Standard ZIP-Download Route (für kleinere Galerien)
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  const fileIds = req.query.fileIds;
+  const fileIds = req.query.fileIds; // Neue Parameter für ausgewählte Dateien
   
   if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
@@ -140,7 +96,9 @@ app.get('/download-zip', async (req, res) => {
     
     let files;
     
+    // Unterscheidung zwischen vollständigem Ordner-Download und Auswahl-Download
     if (fileIds && fileIds.trim() !== '') {
+      // Spezifische Dateiauswahl
       const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
       console.log(`Ausgewählte Dateien: ${selectedFileIds.length}`);
       
@@ -159,9 +117,11 @@ app.get('/download-zip', async (req, res) => {
           });
         } catch (error) {
           console.warn(`Datei ${fileId} konnte nicht gefunden werden:`, error.message);
+          // Datei überspringen, nicht den ganzen Download abbrechen
         }
       }
     } else {
+      // Vollständiger Ordner-Download (bestehende Logik)
       files = await listAllFilesRecursive(folderId);
     }
     
@@ -169,11 +129,12 @@ app.get('/download-zip', async (req, res) => {
 
     console.log(`${files.length} Dateien zum Download vorbereitet`);
 
+    // Rest der bestehenden Logik bleibt gleich...
     const timeout = setTimeout(() => {
       console.error('ZIP-Download Timeout');
       cleanup();
       sendError(408, 'Download-Timeout');
-    }, 1800000); // 30 Minuten
+    }, 1800000);
 
     tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
     const output = fs.createWriteStream(tmpPath);
@@ -286,191 +247,24 @@ app.get('/download-zip', async (req, res) => {
   }
 });
 
-// Streaming ZIP-Download für große Galerien (500+ Bilder)
-app.get('/download-zip-streaming', async (req, res) => {
-  const folderId = req.query.folderId;
-  const fileIds = req.query.fileIds;
-  
-  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
-  let isResponseSent = false;
-  
-  const sendError = (statusCode, message) => {
-    if (!isResponseSent) {
-      isResponseSent = true;
-      res.status(statusCode).json({ error: message });
-    }
-  };
 
-  try {
-    console.log(`Streaming ZIP-Download gestartet für Ordner: ${folderId}`);
-    
-    let files;
-    
-    if (fileIds && fileIds.trim() !== '') {
-      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
-      files = [];
-      
-      // Parallelisierte Dateiinfo-Abfrage
-      const fileInfoPromises = selectedFileIds.map(async (fileId) => {
-        try {
-          const fileInfo = await drive.files.get({
-            fileId: fileId,
-            fields: 'id, name, mimeType, size'
-          });
-          return {
-            id: fileInfo.data.id,
-            name: fileInfo.data.name,
-            mimeType: fileInfo.data.mimeType,
-            path: fileInfo.data.name,
-            size: parseInt(fileInfo.data.size) || 0
-          };
-        } catch (error) {
-          console.warn(`Datei ${fileId} konnte nicht gefunden werden:`, error.message);
-          return null;
-        }
-      });
-      
-      const fileInfos = await Promise.all(fileInfoPromises);
-      files = fileInfos.filter(f => f !== null);
-    } else {
-      files = await listAllFilesRecursive(folderId);
-    }
-    
-    if (!files.length) return sendError(404, 'Keine Dateien gefunden');
-
-    console.log(`${files.length} Dateien zum Streaming vorbereitet`);
-
-    // Längerer Timeout für große Galerien
-    const timeout = setTimeout(() => {
-      console.error('Streaming ZIP-Download Timeout');
-      if (!res.headersSent) {
-        sendError(408, 'Download-Timeout');
-      }
-    }, 1800000); // 30 Minuten
-
-    // Set headers für ZIP-Download
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="gallery.zip"');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    
-    // Erstelle ZIP-Archiv das direkt an Response streamt
-    const archive = archiver('zip', { 
-      zlib: { level: 1 }, // Niedrigere Kompression für bessere Performance
-      forceLocalTime: true,
-      store: false
-    });
-
-    archive.on('error', (err) => {
-      console.error('ZIP-Archiv Fehler:', err);
-      clearTimeout(timeout);
-      if (!res.headersSent) {
-        sendError(500, 'Fehler beim Erstellen der ZIP-Datei');
-      }
-    });
-
-    archive.on('warning', (err) => {
-      console.warn('ZIP-Archiv Warnung:', err);
-    });
-
-    // Pipe direkt zur Response
-    archive.pipe(res);
-    isResponseSent = true;
-
-    let processedFiles = 0;
-    const concurrencyLimit = 3; // Reduzierte Parallelität für Stabilität
-    
-    // Verarbeite Dateien in kleineren Batches
-    for (let i = 0; i < files.length; i += concurrencyLimit) {
-      const batch = files.slice(i, i + concurrencyLimit);
-      
-      await Promise.all(batch.map(async (file) => {
-        let retries = 3;
-        while (retries > 0) {
-          try {
-            const { data } = await drive.files.get(
-              { fileId: file.id, alt: 'media' },
-              { 
-                responseType: 'stream',
-                timeout: 60000 // Längerer Timeout pro Datei
-              }
-            );
-            
-            archive.append(data, { 
-              name: file.path || file.name,
-              date: new Date()
-            });
-            
-            processedFiles++;
-            if (processedFiles % 25 === 0) {
-              console.log(`${processedFiles}/${files.length} Dateien verarbeitet`);
-            }
-            break; // Erfolgreich, verlasse Retry-Loop
-            
-          } catch (fileError) {
-            retries--;
-            console.error(`Fehler bei Datei ${file.name} (${3-retries}/3):`, fileError.message);
-            
-            if (retries === 0) {
-              console.error(`Datei ${file.name} wird übersprungen nach 3 Versuchen`);
-            } else {
-              // Kurze Pause vor Retry
-              await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-          }
-        }
-      }));
-      
-      // Kleine Pause zwischen Batches um Server zu entlasten
-      if (i + concurrencyLimit < files.length) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-    }
-
-    console.log('Alle Dateien hinzugefügt, finalisiere ZIP...');
-    archive.finalize();
-
-    archive.on('end', () => {
-      clearTimeout(timeout);
-      console.log(`Streaming ZIP-Download abgeschlossen: ${archive.pointer()} bytes`);
-    });
-
-    res.on('close', () => {
-      console.log('Client-Verbindung geschlossen');
-      clearTimeout(timeout);
-    });
-
-    res.on('error', (err) => {
-      console.error('Response Stream Fehler:', err);
-      clearTimeout(timeout);
-    });
-
-  } catch (error) {
-    console.error('Fehler in /download-zip-streaming:', error);
-    clearTimeout(timeout);
-    if (!isResponseSent) {
-      sendError(500, 'Interner Fehler beim Streaming ZIP-Download');
-    }
-  }
-});
 
 // POST /rename-file
 app.post('/rename-file', async (req, res) => {
     const { fileId, newName } = req.body;
     
-    try {
-        // Google Drive API call to rename file
-        const response = await drive.files.update({
-            fileId: fileId,
-            requestBody: { name: newName }
-        });
-        
-        res.json({ success: true, file: response.data });
-    } catch (error) {
-        console.error('Fehler beim Umbenennen der Datei:', error);
-        res.status(500).json({ success: false, error: 'Umbenennung fehlgeschlagen' });
-    }
+    // Google Drive API call to rename file
+    const response = await drive.files.update({
+        fileId: fileId,
+        requestBody: { name: newName }
+    });
+    
+    res.json({ success: true, file: response.data });
 });
+
+
+
 
 // Upload-Route
 app.post('/upload-file', async (req, res) => {
@@ -507,28 +301,6 @@ app.post('/upload-file', async (req, res) => {
   }
 });
 
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    endpoints: [
-      '/download-info',
-      '/download-zip', 
-      '/download-zip-streaming',
-      '/upload-file',
-      '/rename-file'
-    ]
-  });
-});
-
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
-  console.log('Verfügbare Endpoints:');
-  console.log('- GET /download-info');
-  console.log('- GET /download-zip');
-  console.log('- GET /download-zip-streaming');
-  console.log('- POST /upload-file');
-  console.log('- POST /rename-file');
-  console.log('- GET /health');
 });
