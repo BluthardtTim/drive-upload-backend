@@ -502,6 +502,241 @@ app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
 });
 
+// REVOLUTIONÄRE LÖSUNG: Progressiver Multi-Chunk Download
+app.get('/download-progressive', async (req, res) => {
+  const { folderId, fileIds, phase = 'metadata' } = req.query;
+  
+  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
+
+  try {
+    let allFiles;
+    
+    // Bestimme alle Dateien
+    if (fileIds && fileIds.trim() !== '') {
+      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
+      allFiles = [];
+      for (const fileId of selectedFileIds) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id, name, mimeType, size'
+          });
+          allFiles.push({
+            id: fileInfo.data.id,
+            name: fileInfo.data.name,
+            mimeType: fileInfo.data.mimeType,
+            size: fileInfo.data.size || 1000000, // 1MB default
+            path: fileInfo.data.name
+          });
+        } catch (error) {
+          console.warn(`Datei ${fileId} übersprungen:`, error.message);
+        }
+      }
+    } else {
+      allFiles = await listAllFilesRecursive(folderId);
+      // Bekomme Größen für bessere Chunk-Berechnung
+      for (let file of allFiles) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: file.id,
+            fields: 'size'
+          });
+          file.size = fileInfo.data.size || 1000000;
+        } catch (error) {
+          file.size = 1000000; // Default 1MB
+        }
+      }
+    }
+
+    if (phase === 'metadata') {
+      // Phase 1: Sende nur Metadata zurück
+      const totalSize = allFiles.reduce((sum, file) => sum + parseInt(file.size), 0);
+      const avgFileSize = totalSize / allFiles.length;
+      
+      // Intelligente Chunk-Größe basierend auf Dateigröße
+      let chunkSize;
+      if (avgFileSize > 10000000) { // > 10MB pro Datei
+        chunkSize = 1; // 1 Datei pro Chunk
+      } else if (avgFileSize > 5000000) { // > 5MB pro Datei
+        chunkSize = 2; // 2 Dateien pro Chunk
+      } else if (allFiles.length > 100) {
+        chunkSize = 3; // Große Galerien
+      } else {
+        chunkSize = 5; // Normale Galerien
+      }
+      
+      return res.json({
+        success: true,
+        totalFiles: allFiles.length,
+        totalSize: totalSize,
+        chunkSize: chunkSize,
+        totalChunks: Math.ceil(allFiles.length / chunkSize),
+        avgFileSize: Math.round(avgFileSize / 1024 / 1024 * 100) / 100 // MB
+      });
+    }
+
+    // Phase 2: Streaming Download aller Dateien als ein kontinuierlicher ZIP
+    console.log(`Progressive Download gestartet: ${allFiles.length} Dateien`);
+
+    const timeout = setTimeout(() => {
+      console.error('Progressive Download Timeout');
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'Download-Timeout' });
+      }
+    }, 7200000); // 2 Stunden Maximum
+
+    // Setze Headers für optimales Streaming
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="progressive-gallery.zip"');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Transfer-Encoding', 'chunked');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    // Ultra-effizientes Archiver mit minimalem Memory-Footprint
+    const archive = archiver('zip', { 
+      zlib: { level: 0 }, // Keine Kompression - pure Geschwindigkeit
+      store: true, // Store-only Mode
+      forceLocalTime: true
+    });
+
+    let processedFiles = 0;
+    let skippedFiles = 0;
+    let totalBytes = 0;
+
+    archive.on('error', (err) => {
+      console.error('Progressive Archiv Fehler:', err);
+      clearTimeout(timeout);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Archiv-Fehler' });
+      }
+    });
+
+    archive.on('progress', (progress) => {
+      totalBytes = progress.entries.processed;
+      if (progress.entries.processed % 10 === 0) {
+        console.log(`Progressive: ${progress.entries.processed} Einträge verarbeitet, ${Math.round(progress.fs.processedBytes / 1024 / 1024)}MB`);
+      }
+    });
+
+    // Direktes Streaming ohne temporäre Dateien
+    archive.pipe(res);
+
+    console.log('Progressive: Starte sequenzielle Verarbeitung...');
+
+    // Sequenzielle Verarbeitung für maximale Stabilität
+    for (const [index, file] of allFiles.entries()) {
+      try {
+        console.log(`Progressive: ${index + 1}/${allFiles.length} - ${file.name} (${Math.round(parseInt(file.size) / 1024)}KB)`);
+        
+        const { data } = await drive.files.get(
+          { fileId: file.id, alt: 'media' },
+          { 
+            responseType: 'stream',
+            timeout: 45000 // 45s pro Datei
+          }
+        );
+        
+        archive.append(data, { 
+          name: file.path || file.name,
+          date: new Date()
+        });
+        
+        processedFiles++;
+        
+        // Micro-Pause zwischen Dateien für Stabilität
+        if (index % 5 === 0) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        // Heartbeat alle 20 Dateien
+        if (index % 20 === 0 && index > 0) {
+          console.log(`Progressive Heartbeat: ${processedFiles}/${allFiles.length} verarbeitet, ${skippedFiles} übersprungen`);
+        }
+        
+      } catch (fileError) {
+        skippedFiles++;
+        console.warn(`Progressive: Datei ${file.name} übersprungen (${fileError.message})`);
+        // Weiter ohne Unterbrechung
+      }
+    }
+
+    console.log(`Progressive: Finalisiere ZIP... (${processedFiles} verarbeitet, ${skippedFiles} übersprungen)`);
+    archive.finalize();
+
+    archive.on('end', () => {
+      clearTimeout(timeout);
+      console.log(`Progressive Download abgeschlossen: ${archive.pointer()} bytes, ${processedFiles}/${allFiles.length} Dateien`);
+    });
+
+    res.on('close', () => {
+      console.log('Progressive: Client-Verbindung geschlossen');
+      clearTimeout(timeout);
+    });
+
+    res.on('error', (err) => {
+      console.error('Progressive Response Error:', err);
+      clearTimeout(timeout);
+    });
+
+  } catch (error) {
+    console.error('Progressive Download Fehler:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Progressive Download fehlgeschlagen' });
+    }
+  }
+});
+
+// BACKUP: Einzeldatei-Download für kritische Fälle
+app.get('/download-single', async (req, res) => {
+  const { fileId } = req.query;
+  
+  if (!fileId) return res.status(400).json({ error: 'fileId fehlt' });
+
+  try {
+    console.log(`Single-Download: ${fileId}`);
+    
+    // Hole Datei-Info
+    const fileInfo = await drive.files.get({
+      fileId: fileId,
+      fields: 'id, name, mimeType, size'
+    });
+    
+    const fileName = fileInfo.data.name;
+    const mimeType = fileInfo.data.mimeType;
+    
+    // Setze passende Headers
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    
+    // Hole und streame Datei direkt
+    const { data } = await drive.files.get(
+      { fileId: fileId, alt: 'media' },
+      { responseType: 'stream' }
+    );
+    
+    data.pipe(res);
+    
+    data.on('end', () => {
+      console.log(`Single-Download abgeschlossen: ${fileName}`);
+    });
+    
+    data.on('error', (err) => {
+      console.error(`Single-Download Fehler für ${fileName}:`, err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Single-Download fehlgeschlagen' });
+      }
+    });
+    
+  } catch (error) {
+    console.error('Single-Download Fehler:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Single-Download fehlgeschlagen' });
+    }
+  }
+});
+
 // Automatisches Cleanup für alte temporäre Dateien
 setInterval(() => {
   try {
