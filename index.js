@@ -322,9 +322,11 @@ app.get('/download-zip-testing', async (req, res) => {
   res.setTimeout(downloadTimeout);
 
   const sendError = (statusCode, message) => {
-    if (!isResponseSent) {
+    if (!isResponseSent && !res.headersSent) {
       isResponseSent = true;
       res.status(statusCode).json({ error: message });
+    } else {
+      console.error(`Attempted to send error after headers sent: ${statusCode} - ${message}`);
     }
   };
 
@@ -375,11 +377,23 @@ app.get('/download-zip-testing', async (req, res) => {
     console.log(`${files.length} Dateien zum Download vorbereitet`);
 
     // Erweiterte Timeout-Behandlung basierend auf Anzahl der Dateien
-    const timeoutDuration = Math.max(600000, files.length * 2000); // Min 10min, 2s pro Datei
+    const timeoutDuration = Math.max(1800000, files.length * 4000); // Min 30min, 4s pro Datei für große Galerien
     const timeout = setTimeout(() => {
       console.error(`ZIP-Download Timeout nach ${timeoutDuration/1000}s für ${files.length} Dateien`);
+      
+      // (Keep-Alive Interval nicht mehr verwendet)
+      
       cleanup();
-      sendError(408, 'Download-Timeout - Versuchen Sie es mit weniger Dateien');
+      
+      // Nur Error senden wenn noch möglich
+      if (!isResponseSent && !res.headersSent) {
+        sendError(408, 'Download-Timeout - Versuchen Sie es mit weniger Dateien');
+      } else {
+        console.error('Timeout occurred but headers already sent - closing connection');
+        if (!res.destroyed) {
+          res.destroy();
+        }
+      }
     }, timeoutDuration);
 
     tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
@@ -417,19 +431,14 @@ app.get('/download-zip-testing', async (req, res) => {
 
     let processedFiles = 0;
     // Kleinere Batch-Größe für große Galerien um Memory-Probleme zu vermeiden
-    const batchSize = 10;
+    const batchSize = files.length > 200 ? 3 : files.length > 100 ? 5 : 10;
     
     console.log(`Verarbeite ${files.length} Dateien in Batches von ${batchSize}`);
     
-    // Füge Keep-Alive Headers hinzu
-    let keepAliveInterval;
-    if (!isResponseSent) {
-      keepAliveInterval = setInterval(() => {
-        if (!isResponseSent && !res.headersSent) {
-          // Sende ein leeres Kommentar um die Verbindung aufrecht zu erhalten
-          res.write(' ');
-        }
-      }, 30000); // Alle 30 Sekunden
+    // Setze Connection Keep-Alive Header am Anfang
+    if (!res.headersSent) {
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('Keep-Alive', 'timeout=1800, max=1000');
     }
     
     for (let i = 0; i < files.length; i += batchSize) {
@@ -500,9 +509,7 @@ app.get('/download-zip-testing', async (req, res) => {
     }
 
     // Keep-Alive stoppen
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-    }
+    // (Nicht mehr benötigt da wir kein Interval verwenden)
 
     console.log('Alle Dateien hinzugefügt, finalisiere ZIP...');
     archive.finalize();
@@ -555,6 +562,7 @@ app.get('/download-zip-testing', async (req, res) => {
     sendError(500, 'Interner Fehler beim ZIP-Download');
   }
 });
+
 
 
 
