@@ -353,7 +353,7 @@ app.get('/download-zip-testing', async (req, res) => {
     archive.pipe(output);
 
     let processedFiles = 0;
-    const batchSize = 2; // Reduziert von 10 auf 2 für bessere Stabilität
+    const batchSize = 10; // Reduziert von 10 auf 2 für bessere Stabilität
     
     console.log(`TESTING - Starte Verarbeitung mit Batch-Size: ${batchSize}`);
     
