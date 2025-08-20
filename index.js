@@ -502,6 +502,244 @@ app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
 });
 
+// ULTIMATIVE LÖSUNG: HTTP/1.1 Force + Chunk-basierter Download
+app.get('/download-chunked', async (req, res) => {
+  const { folderId, fileIds, chunkIndex = 0, chunkSize = 3 } = req.query;
+  
+  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
+
+  try {
+    console.log(`Chunked Download: Chunk ${chunkIndex}, Size ${chunkSize}`);
+    
+    let allFiles;
+    
+    // Bestimme alle Dateien
+    if (fileIds && fileIds.trim() !== '') {
+      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
+      allFiles = [];
+      for (const fileId of selectedFileIds) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id, name, mimeType, size'
+          });
+          allFiles.push({
+            id: fileInfo.data.id,
+            name: fileInfo.data.name,
+            mimeType: fileInfo.data.mimeType,
+            size: fileInfo.data.size || 1000000,
+            path: fileInfo.data.name
+          });
+        } catch (error) {
+          console.warn(`Datei ${fileId} übersprungen:`, error.message);
+        }
+      }
+    } else {
+      allFiles = await listAllFilesRecursive(folderId);
+      // Bekomme Größen
+      for (let file of allFiles) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: file.id,
+            fields: 'size'
+          });
+          file.size = fileInfo.data.size || 1000000;
+        } catch (error) {
+          file.size = 1000000;
+        }
+      }
+    }
+    
+    // Berechne Chunk-Grenzen
+    const startIndex = parseInt(chunkIndex) * parseInt(chunkSize);
+    const endIndex = Math.min(startIndex + parseInt(chunkSize), allFiles.length);
+    const chunkFiles = allFiles.slice(startIndex, endIndex);
+    
+    if (chunkFiles.length === 0) {
+      return res.json({ 
+        success: true, 
+        completed: true, 
+        totalFiles: allFiles.length,
+        chunk: parseInt(chunkIndex),
+        files: []
+      });
+    }
+
+    console.log(`Chunked: Verarbeite ${startIndex}-${endIndex-1} von ${allFiles.length} Dateien`);
+
+    // FORCE HTTP/1.1 Headers um HTTP/2 Probleme zu vermeiden
+    res.setHeader('Connection', 'close'); // Force connection close
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="chunk-${chunkIndex}.zip"`);
+    
+    // Explizit HTTP/1.1 Features deaktivieren
+    res.removeHeader('Transfer-Encoding');
+    res.removeHeader('Keep-Alive');
+
+    // Kurzer Timeout für kleine Chunks
+    const timeout = setTimeout(() => {
+      console.error(`Chunked Timeout für Chunk ${chunkIndex}`);
+      if (!res.headersSent) {
+        res.status(408).json({ error: 'Chunk-Timeout' });
+      }
+    }, 300000); // 5 Minuten pro Chunk
+
+    // Ultra-effizientes Archiver für kleine Chunks
+    const archive = archiver('zip', { 
+      zlib: { level: 0 }, // Null Kompression
+      store: true, // Store-only
+      forceLocalTime: true
+    });
+
+    archive.on('error', (err) => {
+      console.error(`Chunked Archiv Fehler (Chunk ${chunkIndex}):`, err);
+      clearTimeout(timeout);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Chunked Archiv-Fehler' });
+      }
+    });
+
+    // Pipe direkt ohne zusätzliche Streaming-Features
+    archive.pipe(res);
+
+    let processedInChunk = 0;
+
+    // Sequenzielle Verarbeitung der Chunk-Dateien
+    for (const [index, file] of chunkFiles.entries()) {
+      try {
+        console.log(`Chunked ${chunkIndex}: ${index + 1}/${chunkFiles.length} - ${file.name} (${Math.round(parseInt(file.size) / 1024)}KB)`);
+        
+        const { data } = await drive.files.get(
+          { fileId: file.id, alt: 'media' },
+          { 
+            responseType: 'stream',
+            timeout: 60000 // 1 Minute pro Datei
+          }
+        );
+        
+        archive.append(data, { 
+          name: file.path || file.name,
+          date: new Date()
+        });
+        
+        processedInChunk++;
+        
+        // Micro-Pause zwischen Dateien
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+      } catch (fileError) {
+        console.error(`Chunked ${chunkIndex} - Datei ${file.name} übersprungen:`, fileError.message);
+        // Weiter ohne Abbruch
+      }
+    }
+
+    console.log(`Chunked ${chunkIndex}: Finalisiere ZIP (${processedInChunk}/${chunkFiles.length} verarbeitet)...`);
+    archive.finalize();
+
+    archive.on('end', () => {
+      clearTimeout(timeout);
+      console.log(`Chunked ${chunkIndex} abgeschlossen: ${archive.pointer()} bytes`);
+    });
+
+    res.on('close', () => {
+      console.log(`Chunked ${chunkIndex}: Client-Verbindung geschlossen`);
+      clearTimeout(timeout);
+    });
+
+    res.on('error', (err) => {
+      console.error(`Chunked ${chunkIndex} Response Error:`, err);
+      clearTimeout(timeout);
+    });
+
+  } catch (error) {
+    console.error(`Chunked ${chunkIndex} Fehler:`, error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: `Chunked ${chunkIndex} fehlgeschlagen` });
+    }
+  }
+});
+
+// Metadata Route für Chunked System
+app.get('/download-metadata-chunked', async (req, res) => {
+  const { folderId, fileIds } = req.query;
+  
+  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
+
+  try {
+    let allFiles;
+    
+    if (fileIds && fileIds.trim() !== '') {
+      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
+      allFiles = [];
+      for (const fileId of selectedFileIds) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id, name, mimeType, size'
+          });
+          allFiles.push({
+            id: fileInfo.data.id,
+            name: fileInfo.data.name,
+            mimeType: fileInfo.data.mimeType,
+            size: fileInfo.data.size || 1000000
+          });
+        } catch (error) {
+          console.warn(`Metadata - Datei ${fileId} übersprungen:`, error.message);
+        }
+      }
+    } else {
+      allFiles = await listAllFilesRecursive(folderId);
+      // Hole Größen für bessere Chunk-Berechnung
+      for (let file of allFiles.slice(0, 10)) { // Nur erste 10 für Schätzung
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: file.id,
+            fields: 'size'
+          });
+          file.size = fileInfo.data.size || 1000000;
+        } catch (error) {
+          file.size = 1000000;
+        }
+      }
+    }
+    
+    const totalSize = allFiles.reduce((sum, file) => sum + (parseInt(file.size) || 1000000), 0);
+    const avgFileSize = totalSize / allFiles.length;
+    
+    // Intelligente Chunk-Größe für Railway's Limits
+    let recommendedChunkSize;
+    if (avgFileSize > 15000000) { // > 15MB pro Datei
+      recommendedChunkSize = 1; // 1 Datei pro Chunk
+    } else if (avgFileSize > 8000000) { // > 8MB pro Datei
+      recommendedChunkSize = 2; // 2 Dateien pro Chunk
+    } else if (allFiles.length > 200) { // Sehr große Galerien
+      recommendedChunkSize = 2; // Kleine Chunks für Stabilität
+    } else {
+      recommendedChunkSize = 3; // Standard
+    }
+    
+    const totalChunks = Math.ceil(allFiles.length / recommendedChunkSize);
+    
+    res.json({
+      success: true,
+      totalFiles: allFiles.length,
+      totalSize: totalSize,
+      avgFileSize: Math.round(avgFileSize / 1024 / 1024 * 100) / 100, // MB
+      recommendedChunkSize: recommendedChunkSize,
+      totalChunks: totalChunks,
+      estimatedTimePerChunk: Math.round(recommendedChunkSize * 2), // 2s pro Datei Schätzung
+      railwayOptimized: true
+    });
+    
+  } catch (error) {
+    console.error('Chunked Metadata Fehler:', error);
+    res.status(500).json({ error: 'Chunked Metadata fehlgeschlagen' });
+  }
+});
+
 // REVOLUTIONÄRE LÖSUNG: Progressiver Multi-Chunk Download
 app.get('/download-progressive', async (req, res) => {
   const { folderId, fileIds, phase = 'metadata' } = req.query;
