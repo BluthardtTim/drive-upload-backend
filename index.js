@@ -417,7 +417,7 @@ app.get('/download-zip-testing', async (req, res) => {
 
     let processedFiles = 0;
     // Kleinere Batch-Größe für große Galerien um Memory-Probleme zu vermeiden
-    const batchSize = files.length > 200 ? 3 : files.length > 100 ? 5 : 10;
+    const batchSize = 10;
     
     console.log(`Verarbeite ${files.length} Dateien in Batches von ${batchSize}`);
     
