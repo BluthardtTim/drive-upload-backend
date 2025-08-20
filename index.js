@@ -1,3 +1,5 @@
+
+
 import express from 'express';
 import fileUpload from 'express-fileupload';
 import cors from 'cors';
@@ -248,6 +250,195 @@ app.get('/download-zip', async (req, res) => {
 });
 
 
+// TEST-Route mit allen Optimierungen
+app.get('/download-zip-testing', async (req, res) => {
+  const folderId = req.query.folderId;
+  const fileIds = req.query.fileIds; // Parameter für ausgewählte Dateien
+  
+  if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
+
+  let tmpPath;
+  let isResponseSent = false;
+
+  const sendError = (statusCode, message) => {
+    if (!isResponseSent) {
+      isResponseSent = true;
+      res.status(statusCode).json({ error: message });
+    }
+  };
+
+  const cleanup = () => {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      // Verzögertes Cleanup für bessere Stabilität
+      setTimeout(() => {
+        fs.unlink(tmpPath, (err) => {
+          if (err) console.error('Fehler beim Löschen der temporären Datei:', err);
+          else console.log('Temporäre Datei erfolgreich gelöscht (TESTING)');
+        });
+      }, 5000); // 5 Sekunden Delay
+    }
+  };
+
+  try {
+    console.log(`ZIP-Download TESTING gestartet für Ordner: ${folderId}`);
+    
+    let files;
+    
+    // Unterscheidung zwischen vollständigem Ordner-Download und Auswahl-Download
+    if (fileIds && fileIds.trim() !== '') {
+      // Spezifische Dateiauswahl
+      const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
+      console.log(`TESTING - Ausgewählte Dateien: ${selectedFileIds.length}`);
+      
+      files = [];
+      for (const fileId of selectedFileIds) {
+        try {
+          const fileInfo = await drive.files.get({
+            fileId: fileId,
+            fields: 'id, name, mimeType'
+          });
+          files.push({
+            id: fileInfo.data.id,
+            name: fileInfo.data.name,
+            mimeType: fileInfo.data.mimeType,
+            path: fileInfo.data.name
+          });
+        } catch (error) {
+          console.warn(`TESTING - Datei ${fileId} konnte nicht gefunden werden:`, error.message);
+          // Datei überspringen, nicht den ganzen Download abbrechen
+        }
+      }
+    } else {
+      // Vollständiger Ordner-Download (optimierte Logik)
+      files = await listAllFilesRecursive(folderId);
+    }
+    
+    if (!files.length) return sendError(404, 'Keine Dateien gefunden');
+
+    console.log(`TESTING - ${files.length} Dateien zum Download vorbereitet`);
+
+    // Timeout auf 45 Minuten für große Galerien erhöht
+    const timeout = setTimeout(() => {
+      console.error('ZIP-Download TESTING Timeout');
+      cleanup();
+      sendError(408, 'Download-Timeout (Testing)');
+    }, 2700000); // 45 Minuten statt 5
+
+    tmpPath = path.join(os.tmpdir(), `folder-testing-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
+    const output = fs.createWriteStream(tmpPath);
+    const archive = archiver('zip', { 
+      zlib: { level: 1 }, // Minimal compression für bessere Performance
+      forceLocalTime: true,
+      store: files.length > 50 // Keine Kompression bei vielen Dateien
+    });
+
+    archive.on('error', (err) => {
+      console.error('ZIP-Archiv TESTING Fehler:', err);
+      clearTimeout(timeout);
+      cleanup();
+      sendError(500, 'Fehler beim Erstellen der ZIP-Datei (Testing)');
+    });
+
+    archive.on('warning', (err) => {
+      console.warn('ZIP-Archiv TESTING Warnung:', err);
+    });
+
+    output.on('error', (err) => {
+      console.error('Output Stream TESTING Fehler:', err);
+      clearTimeout(timeout);
+      cleanup();
+      sendError(500, 'Fehler beim Schreiben der ZIP-Datei (Testing)');
+    });
+
+    archive.pipe(output);
+
+    let processedFiles = 0;
+    const batchSize = 2; // Reduziert von 10 auf 2 für bessere Stabilität
+    
+    console.log(`TESTING - Starte Verarbeitung mit Batch-Size: ${batchSize}`);
+    
+    for (let i = 0; i < files.length; i += batchSize) {
+      const batch = files.slice(i, i + batchSize);
+      
+      await Promise.all(batch.map(async (file) => {
+        try {
+          const { data } = await drive.files.get(
+            { fileId: file.id, alt: 'media' },
+            { 
+              responseType: 'stream',
+              timeout: 60000 // Timeout auf 60 Sekunden erhöht
+            }
+          );
+          
+          archive.append(data, { 
+            name: file.path || file.name,
+            date: new Date()
+          });
+          
+          processedFiles++;
+          if (processedFiles % 20 === 0) { // Häufigere Fortschritts-Updates
+            console.log(`TESTING - ${processedFiles}/${files.length} Dateien verarbeitet`);
+          }
+        } catch (fileError) {
+          console.error(`TESTING - Datei ${file.name} übersprungen:`, fileError.message);
+          // Weiter mit nächster Datei statt Abbruch der gesamten Operation
+        }
+      }));
+    }
+
+    console.log('TESTING - Alle Dateien hinzugefügt, finalisiere ZIP...');
+    archive.finalize();
+
+    output.on('close', () => {
+      clearTimeout(timeout);
+      console.log(`TESTING - ZIP-Datei erstellt: ${archive.pointer()} bytes`);
+      
+      if (!isResponseSent) {
+        isResponseSent = true;
+        
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="folder-testing.zip"');
+        res.setHeader('Content-Length', fs.statSync(tmpPath).size);
+        
+        const fileStream = fs.createReadStream(tmpPath);
+        
+        fileStream.on('error', (err) => {
+          console.error('TESTING - Fehler beim Lesen der ZIP-Datei:', err);
+          cleanup();
+          if (!res.headersSent) {
+            sendError(500, 'Fehler beim Senden der ZIP-Datei (Testing)');
+          }
+        });
+
+        fileStream.on('end', () => {
+          console.log('TESTING - ZIP-Download abgeschlossen');
+          cleanup();
+        });
+
+        res.on('close', () => {
+          console.log('TESTING - Client-Verbindung geschlossen');
+          cleanup();
+        });
+
+        res.on('error', (err) => {
+          console.error('TESTING - Response Stream Fehler:', err);
+          cleanup();
+        });
+
+        fileStream.pipe(res);
+      } else {
+        cleanup();
+      }
+    });
+
+  } catch (error) {
+    console.error('TESTING - Fehler in /download-zip-testing:', error);
+    cleanup();
+    sendError(500, 'Interner Fehler beim ZIP-Download (Testing)');
+  }
+});
+
+
 
 
 // POST /rename-file
@@ -304,3 +495,40 @@ app.post('/upload-file', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
 });
+
+// Automatisches Cleanup für alte temporäre Dateien
+setInterval(() => {
+  try {
+    const tempDir = os.tmpdir();
+    const files = fs.readdirSync(tempDir);
+    
+    const oldZipFiles = files
+      .filter(file => file.startsWith('folder-') && file.endsWith('.zip'))
+      .filter(file => {
+        try {
+          const filePath = path.join(tempDir, file);
+          const stats = fs.statSync(filePath);
+          const ageInMinutes = (Date.now() - stats.mtime.getTime()) / (1000 * 60);
+          return ageInMinutes > 60; // Dateien älter als 60 Minuten
+        } catch (error) {
+          return false;
+        }
+      });
+    
+    oldZipFiles.forEach(file => {
+      try {
+        const filePath = path.join(tempDir, file);
+        fs.unlinkSync(filePath);
+        console.log(`Alte temporäre Datei gelöscht: ${file}`);
+      } catch (error) {
+        console.error(`Fehler beim Löschen von ${file}:`, error.message);
+      }
+    });
+    
+    if (oldZipFiles.length > 0) {
+      console.log(`Cleanup abgeschlossen: ${oldZipFiles.length} alte Dateien entfernt`);
+    }
+  } catch (error) {
+    console.error('Fehler beim automatischen Cleanup:', error.message);
+  }
+}, 30 * 60 * 1000); // Alle 30 Minuten
