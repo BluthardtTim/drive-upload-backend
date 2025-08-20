@@ -1,4 +1,7 @@
+// This is my Code for the backend hosted on railway 
 
+
+// index.js:
 
 import express from 'express';
 import fileUpload from 'express-fileupload';
@@ -250,7 +253,7 @@ app.get('/download-zip', async (req, res) => {
 });
 
 
-// TEST-Route mit allen Optimierungen
+// TEST-Route mit allen Optimierungen + HTTP/2 Fix
 app.get('/download-zip-testing', async (req, res) => {
   const folderId = req.query.folderId;
   const fileIds = req.query.fileIds; // Parameter für ausgewählte Dateien
@@ -259,15 +262,18 @@ app.get('/download-zip-testing', async (req, res) => {
 
   let tmpPath;
   let isResponseSent = false;
+  let heartbeatInterval;
 
   const sendError = (statusCode, message) => {
     if (!isResponseSent) {
       isResponseSent = true;
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
       res.status(statusCode).json({ error: message });
     }
   };
 
   const cleanup = () => {
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (tmpPath && fs.existsSync(tmpPath)) {
       // Verzögertes Cleanup für bessere Stabilität
       setTimeout(() => {
@@ -317,56 +323,74 @@ app.get('/download-zip-testing', async (req, res) => {
 
     console.log(`TESTING - ${files.length} Dateien zum Download vorbereitet`);
 
-    // Timeout auf 45 Minuten für große Galerien erhöht
+    // Timeout auf 60 Minuten für sehr große Galerien erhöht
     const timeout = setTimeout(() => {
       console.error('ZIP-Download TESTING Timeout');
       cleanup();
       sendError(408, 'Download-Timeout (Testing)');
-    }, 2700000); // 45 Minuten statt 5
+    }, 3600000); // 60 Minuten
 
-    tmpPath = path.join(os.tmpdir(), `folder-testing-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
-    const output = fs.createWriteStream(tmpPath);
+    // HTTP/2 Protocol Error Fix: Explizite Headers setzen
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Keep-Alive', 'timeout=3600, max=1000');
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', 'attachment; filename="folder-testing.zip"');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('X-Accel-Buffering', 'no'); // Nginx buffering deaktivieren
+    
+    // Verhindere HTTP/2 Probleme durch forciertes Chunked Transfer
+    res.setHeader('Transfer-Encoding', 'chunked');
+    
+    console.log('TESTING - Headers gesetzt, starte direktes Streaming...');
+
+    // DIREKTES STREAMING ohne temporäre Datei (HTTP/2 Fix)
     const archive = archiver('zip', { 
-      zlib: { level: 1 }, // Minimal compression für bessere Performance
+      zlib: { level: 0 }, // Keine Kompression für maximale Geschwindigkeit
       forceLocalTime: true,
-      store: files.length > 50 // Keine Kompression bei vielen Dateien
+      store: true // Immer store-only für große Dateien
     });
+
+    // Heartbeat um Verbindung aufrecht zu erhalten
+    heartbeatInterval = setInterval(() => {
+      if (!res.headersSent) {
+        console.log('TESTING - Sende Heartbeat Header...');
+        res.write(''); // Leeren Chunk senden
+      }
+    }, 30000); // Alle 30 Sekunden
 
     archive.on('error', (err) => {
       console.error('ZIP-Archiv TESTING Fehler:', err);
       clearTimeout(timeout);
       cleanup();
-      sendError(500, 'Fehler beim Erstellen der ZIP-Datei (Testing)');
+      if (!isResponseSent) {
+        sendError(500, 'Fehler beim Erstellen der ZIP-Datei (Testing)');
+      }
     });
 
     archive.on('warning', (err) => {
       console.warn('ZIP-Archiv TESTING Warnung:', err);
     });
 
-    output.on('error', (err) => {
-      console.error('Output Stream TESTING Fehler:', err);
-      clearTimeout(timeout);
-      cleanup();
-      sendError(500, 'Fehler beim Schreiben der ZIP-Datei (Testing)');
-    });
-
-    archive.pipe(output);
+    // Pipe direkt in Response (kein temp file)
+    archive.pipe(res);
 
     let processedFiles = 0;
-    const batchSize = 10; // Reduziert von 10 auf 2 für bessere Stabilität
+    const batchSize = 1; // Auf 1 reduziert für maximale Stabilität
     
-    console.log(`TESTING - Starte Verarbeitung mit Batch-Size: ${batchSize}`);
+    console.log(`TESTING - Starte Verarbeitung mit Batch-Size: ${batchSize} (DIRECT STREAMING)`);
     
     for (let i = 0; i < files.length; i += batchSize) {
       const batch = files.slice(i, i + batchSize);
       
       await Promise.all(batch.map(async (file) => {
         try {
+          console.log(`TESTING - Verarbeite Datei ${processedFiles + 1}/${files.length}: ${file.name}`);
+          
           const { data } = await drive.files.get(
             { fileId: file.id, alt: 'media' },
             { 
               responseType: 'stream',
-              timeout: 60000 // Timeout auf 60 Sekunden erhöht
+              timeout: 120000 // Timeout auf 2 Minuten pro Datei erhöht
             }
           );
           
@@ -376,11 +400,16 @@ app.get('/download-zip-testing', async (req, res) => {
           });
           
           processedFiles++;
-          if (processedFiles % 20 === 0) { // Häufigere Fortschritts-Updates
-            console.log(`TESTING - ${processedFiles}/${files.length} Dateien verarbeitet`);
+          if (processedFiles % 10 === 0) { // Noch häufigere Updates
+            console.log(`TESTING - ${processedFiles}/${files.length} Dateien verarbeitet (${Math.round(processedFiles/files.length*100)}%)`);
           }
+          
+          // Kurze Pause zwischen Dateien für Stabilität
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
         } catch (fileError) {
           console.error(`TESTING - Datei ${file.name} übersprungen:`, fileError.message);
+          processedFiles++; // Zähle trotzdem weiter
           // Weiter mit nächster Datei statt Abbruch der gesamten Operation
         }
       }));
@@ -389,52 +418,29 @@ app.get('/download-zip-testing', async (req, res) => {
     console.log('TESTING - Alle Dateien hinzugefügt, finalisiere ZIP...');
     archive.finalize();
 
-    output.on('close', () => {
+    archive.on('end', () => {
       clearTimeout(timeout);
-      console.log(`TESTING - ZIP-Datei erstellt: ${archive.pointer()} bytes`);
-      
-      if (!isResponseSent) {
-        isResponseSent = true;
-        
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Content-Disposition', 'attachment; filename="folder-testing.zip"');
-        res.setHeader('Content-Length', fs.statSync(tmpPath).size);
-        
-        const fileStream = fs.createReadStream(tmpPath);
-        
-        fileStream.on('error', (err) => {
-          console.error('TESTING - Fehler beim Lesen der ZIP-Datei:', err);
-          cleanup();
-          if (!res.headersSent) {
-            sendError(500, 'Fehler beim Senden der ZIP-Datei (Testing)');
-          }
-        });
+      cleanup();
+      console.log(`TESTING - ZIP-Stream abgeschlossen, ${archive.pointer()} bytes gesendet`);
+      isResponseSent = true;
+    });
 
-        fileStream.on('end', () => {
-          console.log('TESTING - ZIP-Download abgeschlossen');
-          cleanup();
-        });
+    res.on('close', () => {
+      console.log('TESTING - Client-Verbindung geschlossen');
+      cleanup();
+    });
 
-        res.on('close', () => {
-          console.log('TESTING - Client-Verbindung geschlossen');
-          cleanup();
-        });
-
-        res.on('error', (err) => {
-          console.error('TESTING - Response Stream Fehler:', err);
-          cleanup();
-        });
-
-        fileStream.pipe(res);
-      } else {
-        cleanup();
-      }
+    res.on('error', (err) => {
+      console.error('TESTING - Response Stream Fehler:', err);
+      cleanup();
     });
 
   } catch (error) {
     console.error('TESTING - Fehler in /download-zip-testing:', error);
     cleanup();
-    sendError(500, 'Interner Fehler beim ZIP-Download (Testing)');
+    if (!isResponseSent) {
+      sendError(500, 'Interner Fehler beim ZIP-Download (Testing)');
+    }
   }
 });
 
