@@ -1,8 +1,3 @@
-// This is my Code for the backend hosted on railway 
-
-
-// index.js:
-
 import express from 'express';
 import fileUpload from 'express-fileupload';
 import cors from 'cors';
@@ -15,13 +10,6 @@ import { PassThrough } from 'stream';
 dotenv.config();
 
 const app = express();
-
-// Increase memory limit for Node.js process
-if (process.env.NODE_OPTIONS && !process.env.NODE_OPTIONS.includes('--max-old-space-size')) {
-  process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS} --max-old-space-size=7168`;
-} else if (!process.env.NODE_OPTIONS) {
-  process.env.NODE_OPTIONS = '--max-old-space-size=7168';
-}
 
 app.use(cors({
   origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
@@ -45,23 +33,6 @@ oauth2Client.setCredentials({
 });
 
 const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
-// Memory monitoring function
-const logMemoryUsage = (label = '') => {
-  const used = process.memoryUsage();
-  console.log(`Memory Usage ${label}:`);
-  for (let key in used) {
-    console.log(`${key}: ${Math.round(used[key] / 1024 / 1024 * 100) / 100} MB`);
-  }
-  
-  // Force garbage collection if memory usage is high
-  if (used.heapUsed > 6 * 1024 * 1024 * 1024) { // 6GB
-    console.log('High memory usage detected, forcing garbage collection...');
-    if (global.gc) {
-      global.gc();
-    }
-  }
-};
 
 // Hilfsfunktion: rekursiv Dateien auflisten
 const listAllFilesRecursive = async (parentId, path = '') => {
@@ -91,7 +62,7 @@ const listAllFilesRecursive = async (parentId, path = '') => {
   return fileList;
 };
 
-// ZIP-Download Route - Optimized for large galleries with streaming
+// ZIP-Download Route
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -102,12 +73,21 @@ app.get('/download-zip', async (req, res) => {
   
   if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
+  let tmpPath;
   let isResponseSent = false;
 
   const sendError = (statusCode, message) => {
     if (!isResponseSent) {
       isResponseSent = true;
       res.status(statusCode).json({ error: message });
+    }
+  };
+
+  const cleanup = () => {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      fs.unlink(tmpPath, (err) => {
+        if (err) console.error('Fehler beim Löschen der temporären Datei:', err);
+      });
     }
   };
 
@@ -149,112 +129,121 @@ app.get('/download-zip', async (req, res) => {
 
     console.log(`${files.length} Dateien zum Download vorbereitet`);
 
-    // Streaming ZIP creation - no temporary file needed
+    // Rest der bestehenden Logik bleibt gleich...
     const timeout = setTimeout(() => {
       console.error('ZIP-Download Timeout');
-      if (!isResponseSent) {
-        sendError(408, 'Download-Timeout');
-      }
-    }, 600000); // Erhöhtes Timeout für große Downloads
+      cleanup();
+      sendError(408, 'Download-Timeout');
+    }, 1800000);
 
-    // Set response headers immediately
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="gallery.zip"');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    
-    // Create streaming archive directly to response
+    tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
+    const output = fs.createWriteStream(tmpPath);
     const archive = archiver('zip', { 
-      zlib: { level: 1 }, // Reduzierte Kompression für bessere Performance
+      zlib: { level: 6 },
       forceLocalTime: true,
-      store: files.length > 200 // Store files ohne Kompression bei vielen Dateien
+      store: files.length > 100
     });
 
     archive.on('error', (err) => {
       console.error('ZIP-Archiv Fehler:', err);
       clearTimeout(timeout);
-      if (!isResponseSent) {
-        isResponseSent = true;
-        if (!res.headersSent) {
-          sendError(500, 'Fehler beim Erstellen der ZIP-Datei');
-        }
-      }
+      cleanup();
+      sendError(500, 'Fehler beim Erstellen der ZIP-Datei');
     });
 
     archive.on('warning', (err) => {
       console.warn('ZIP-Archiv Warnung:', err);
     });
 
-    res.on('error', (err) => {
-      console.error('Response Stream Fehler:', err);
+    output.on('error', (err) => {
+      console.error('Output Stream Fehler:', err);
       clearTimeout(timeout);
+      cleanup();
+      sendError(500, 'Fehler beim Schreiben der ZIP-Datei');
     });
 
-    res.on('close', () => {
-      console.log('Client-Verbindung geschlossen');
-      clearTimeout(timeout);
-    });
-
-    // Pipe archive directly to response
-    archive.pipe(res);
+    archive.pipe(output);
 
     let processedFiles = 0;
-    const batchSize = 5; // Kleinere Batches für bessere RAM-Verwaltung
+    const batchSize = 10;
     
     for (let i = 0; i < files.length; i += batchSize) {
       const batch = files.slice(i, i + batchSize);
       
-      // Sequenzielle Verarbeitung statt parallel für bessere RAM-Kontrolle
-      for (const file of batch) {
+      await Promise.all(batch.map(async (file) => {
         try {
           const { data } = await drive.files.get(
             { fileId: file.id, alt: 'media' },
             { 
               responseType: 'stream',
-              timeout: 45000
+              timeout: 1800000
             }
           );
           
-          // Stream direkt ins Archiv ohne Zwischenspeicherung
           archive.append(data, { 
             name: file.path || file.name,
             date: new Date()
           });
           
           processedFiles++;
-          if (processedFiles % 25 === 0) {
+          if (processedFiles % 50 === 0) {
             console.log(`${processedFiles}/${files.length} Dateien verarbeitet`);
           }
-          
-          // Kurze Pause zwischen Dateien um RAM zu entlasten
-          if (processedFiles % 10 === 0) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-            // Log memory usage every 25 files
-            if (processedFiles % 25 === 0) {
-              logMemoryUsage(`after ${processedFiles} files`);
-            }
-          }
-          
         } catch (fileError) {
           console.error(`Fehler bei Datei ${file.name}:`, fileError.message);
         }
-      }
+      }));
     }
 
     console.log('Alle Dateien hinzugefügt, finalisiere ZIP...');
-    
     archive.finalize();
-    
-    archive.on('end', () => {
+
+    output.on('close', () => {
       clearTimeout(timeout);
-      console.log(`ZIP-Download abgeschlossen: ${archive.pointer()} bytes`);
-      isResponseSent = true;
+      console.log(`ZIP-Datei erstellt: ${archive.pointer()} bytes`);
+      
+      if (!isResponseSent) {
+        isResponseSent = true;
+        
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
+        res.setHeader('Content-Length', fs.statSync(tmpPath).size);
+        
+        const fileStream = fs.createReadStream(tmpPath);
+        
+        fileStream.on('error', (err) => {
+          console.error('Fehler beim Lesen der ZIP-Datei:', err);
+          cleanup();
+          if (!res.headersSent) {
+            sendError(500, 'Fehler beim Senden der ZIP-Datei');
+          }
+        });
+
+        fileStream.on('end', () => {
+          console.log('ZIP-Download abgeschlossen');
+          cleanup();
+        });
+
+        res.on('close', () => {
+          console.log('Client-Verbindung geschlossen');
+          cleanup();
+        });
+
+        res.on('error', (err) => {
+          console.error('Response Stream Fehler:', err);
+          cleanup();
+        });
+
+        fileStream.pipe(res);
+      } else {
+        cleanup();
+      }
     });
 
   } catch (error) {
     console.error('Fehler in /download-zip:', error);
-    if (!isResponseSent) {
-      sendError(500, 'Interner Fehler beim ZIP-Download');
-    }
+    cleanup();
+    sendError(500, 'Interner Fehler beim ZIP-Download');
   }
 });
 
