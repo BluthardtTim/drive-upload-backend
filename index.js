@@ -1,10 +1,3 @@
-// This is my Code for the backend hosted on railway 
-
-// If you make changes to the code duplicate the url add a new one with the ending - testing to always have the old one running
-// and the new one for testing. If everything works fine you can delete the old one
-
-
-// index.js:
 import express from 'express';
 import fileUpload from 'express-fileupload';
 import cors from 'cors';
@@ -14,67 +7,18 @@ import { Readable } from 'stream';
 import archiver from 'archiver';
 import { PassThrough } from 'stream';
 
-// Enable garbage collection in production
-if (process.env.NODE_ENV === 'production') {
-  // Set memory limits and garbage collection flags
-  process.env.NODE_OPTIONS = '--max-old-space-size=7500 --expose-gc';
-}
-
 dotenv.config();
 
 const app = express();
 
-// Add memory monitoring
-const logMemoryUsage = () => {
-  const used = process.memoryUsage();
-  console.log(`Memory Usage: RSS: ${Math.round(used.rss / 1024 / 1024)}MB, Heap Used: ${Math.round(used.heapUsed / 1024 / 1024)}MB, Heap Total: ${Math.round(used.heapTotal / 1024 / 1024)}MB`);
-};
-
-// Log memory usage every 5 minutes
-setInterval(logMemoryUsage, 5 * 60 * 1000);
-
 app.use(cors({
-  origin: [
-    'https://www.emelieundtim.de', 
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'http://localhost:5175', 
-    'http://localhost:5176',
-    'http://localhost:4173', // Vite preview
-    'http://localhost:3000'   // Alternative port
-  ],
-  methods: ['GET', 'POST', 'OPTIONS'],
-  credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Origin', 'X-Requested-With'],
-  exposedHeaders: ['Content-Length', 'Content-Type']
+  origin: ['https://www.emelieundtim.de', 'http://localhost:5173'],
+  methods: ['GET', 'POST'],
 }));
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(fileUpload());
-
-// Explicit CORS preflight handling for all routes
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', req.headers.origin);
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept, Origin, X-Requested-With');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  
-  if (req.method === 'OPTIONS') {
-    res.sendStatus(200);
-    return;
-  }
-  next();
-});
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    memory: process.memoryUsage()
-  });
-});
 
 const PORT = process.env.PORT || 3000;
 
@@ -125,17 +69,25 @@ import os from 'os';
 
 app.get('/download-zip', async (req, res) => {
   const folderId = req.query.folderId;
-  const fileIds = req.query.fileIds;
+  const fileIds = req.query.fileIds; // Neue Parameter für ausgewählte Dateien
   
   if (!folderId) return res.status(400).json({ error: 'folderId fehlt' });
 
+  let tmpPath;
   let isResponseSent = false;
-  let processedFiles = 0;
 
   const sendError = (statusCode, message) => {
     if (!isResponseSent) {
       isResponseSent = true;
       res.status(statusCode).json({ error: message });
+    }
+  };
+
+  const cleanup = () => {
+    if (tmpPath && fs.existsSync(tmpPath)) {
+      fs.unlink(tmpPath, (err) => {
+        if (err) console.error('Fehler beim Löschen der temporären Datei:', err);
+      });
     }
   };
 
@@ -146,6 +98,7 @@ app.get('/download-zip', async (req, res) => {
     
     // Unterscheidung zwischen vollständigem Ordner-Download und Auswahl-Download
     if (fileIds && fileIds.trim() !== '') {
+      // Spezifische Dateiauswahl
       const selectedFileIds = fileIds.split(',').map(id => id.trim()).filter(id => id);
       console.log(`Ausgewählte Dateien: ${selectedFileIds.length}`);
       
@@ -164,9 +117,11 @@ app.get('/download-zip', async (req, res) => {
           });
         } catch (error) {
           console.warn(`Datei ${fileId} konnte nicht gefunden werden:`, error.message);
+          // Datei überspringen, nicht den ganzen Download abbrechen
         }
       }
     } else {
+      // Vollständiger Ordner-Download (bestehende Logik)
       files = await listAllFilesRecursive(folderId);
     }
     
@@ -174,106 +129,121 @@ app.get('/download-zip', async (req, res) => {
 
     console.log(`${files.length} Dateien zum Download vorbereitet`);
 
-    // Set timeout based on number of files (more time for larger galleries)
+    // Rest der bestehenden Logik bleibt gleich...
     const timeout = setTimeout(() => {
       console.error('ZIP-Download Timeout');
+      cleanup();
       sendError(408, 'Download-Timeout');
-    }, Math.max(1800000, files.length * 5000)); // Min 30 min, +5s per file
+    }, 1800000);
 
-    // Stream ZIP directly to response - NO temporary file
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
-    res.setHeader('Transfer-Encoding', 'chunked');
-    
+    tmpPath = path.join(os.tmpdir(), `folder-${Date.now()}-${Math.random().toString(36).substr(2, 9)}.zip`);
+    const output = fs.createWriteStream(tmpPath);
     const archive = archiver('zip', { 
-      zlib: { level: 1 }, // Reduced compression for speed and less RAM
+      zlib: { level: 6 },
       forceLocalTime: true,
-      store: files.length > 200 // No compression for large galleries
+      store: files.length > 100
     });
 
     archive.on('error', (err) => {
       console.error('ZIP-Archiv Fehler:', err);
       clearTimeout(timeout);
-      if (!isResponseSent) {
-        sendError(500, 'Fehler beim Erstellen der ZIP-Datei');
-      }
+      cleanup();
+      sendError(500, 'Fehler beim Erstellen der ZIP-Datei');
     });
 
     archive.on('warning', (err) => {
       console.warn('ZIP-Archiv Warnung:', err);
     });
 
-    res.on('error', (err) => {
-      console.error('Response Stream Fehler:', err);
+    output.on('error', (err) => {
+      console.error('Output Stream Fehler:', err);
       clearTimeout(timeout);
+      cleanup();
+      sendError(500, 'Fehler beim Schreiben der ZIP-Datei');
     });
 
-    res.on('close', () => {
-      console.log('Client-Verbindung geschlossen');
-      clearTimeout(timeout);
-    });
+    archive.pipe(output);
 
-    // Pipe archive directly to response
-    archive.pipe(res);
-    isResponseSent = true;
-
-    // Process files in smaller batches to control memory usage
-    const batchSize = Math.max(3, Math.min(10, Math.floor(50 / Math.max(1, files.length / 100))));
-    console.log(`Using batch size: ${batchSize}`);
+    let processedFiles = 0;
+    const batchSize = 10;
     
     for (let i = 0; i < files.length; i += batchSize) {
       const batch = files.slice(i, i + batchSize);
       
-      // Process batch sequentially to control memory usage
-      for (const file of batch) {
+      await Promise.all(batch.map(async (file) => {
         try {
           const { data } = await drive.files.get(
             { fileId: file.id, alt: 'media' },
             { 
               responseType: 'stream',
-              timeout: 60000 // 1 minute per file
+              timeout: 1800000
             }
           );
           
-          // Stream file directly into archive
           archive.append(data, { 
             name: file.path || file.name,
             date: new Date()
           });
           
           processedFiles++;
-          if (processedFiles % 25 === 0) {
-            console.log(`${processedFiles}/${files.length} Dateien verarbeitet (${Math.round(processedFiles/files.length*100)}%)`);
-            
-            // Force garbage collection hint
-            if (global.gc) {
-              global.gc();
-            }
+          if (processedFiles % 50 === 0) {
+            console.log(`${processedFiles}/${files.length} Dateien verarbeitet`);
           }
         } catch (fileError) {
           console.error(`Fehler bei Datei ${file.name}:`, fileError.message);
         }
-      }
-      
-      // Small delay between batches to prevent overwhelming the system
-      if (i + batchSize < files.length) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
+      }));
     }
 
     console.log('Alle Dateien hinzugefügt, finalisiere ZIP...');
     archive.finalize();
 
-    archive.on('end', () => {
+    output.on('close', () => {
       clearTimeout(timeout);
-      console.log(`ZIP-Download abgeschlossen: ${processedFiles}/${files.length} Dateien`);
+      console.log(`ZIP-Datei erstellt: ${archive.pointer()} bytes`);
+      
+      if (!isResponseSent) {
+        isResponseSent = true;
+        
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="folder.zip"');
+        res.setHeader('Content-Length', fs.statSync(tmpPath).size);
+        
+        const fileStream = fs.createReadStream(tmpPath);
+        
+        fileStream.on('error', (err) => {
+          console.error('Fehler beim Lesen der ZIP-Datei:', err);
+          cleanup();
+          if (!res.headersSent) {
+            sendError(500, 'Fehler beim Senden der ZIP-Datei');
+          }
+        });
+
+        fileStream.on('end', () => {
+          console.log('ZIP-Download abgeschlossen');
+          cleanup();
+        });
+
+        res.on('close', () => {
+          console.log('Client-Verbindung geschlossen');
+          cleanup();
+        });
+
+        res.on('error', (err) => {
+          console.error('Response Stream Fehler:', err);
+          cleanup();
+        });
+
+        fileStream.pipe(res);
+      } else {
+        cleanup();
+      }
     });
 
   } catch (error) {
     console.error('Fehler in /download-zip:', error);
-    if (!isResponseSent) {
-      sendError(500, 'Interner Fehler beim ZIP-Download');
-    }
+    cleanup();
+    sendError(500, 'Interner Fehler beim ZIP-Download');
   }
 });
 
@@ -334,4 +304,3 @@ app.post('/upload-file', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server läuft auf Port ${PORT}`);
 });
-
